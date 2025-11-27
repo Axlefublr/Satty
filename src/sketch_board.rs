@@ -661,6 +661,19 @@ impl SketchBoard {
                             .output_sender()
                             .emit(SketchBoardOutput::ColorSwitchShortcut(index_digit as u64));
                     }
+                } else {
+                    match txt.chars().next() {
+                        Some('S') => sender.input(SketchBoardInput::ToolbarEvent(
+                            ToolbarEvent::SizeSelected(crate::style::Size::Small),
+                        )),
+                        Some('M') => sender.input(SketchBoardInput::ToolbarEvent(
+                            ToolbarEvent::SizeSelected(crate::style::Size::Medium),
+                        )),
+                        Some('L') => sender.input(SketchBoardInput::ToolbarEvent(
+                            ToolbarEvent::SizeSelected(crate::style::Size::Large),
+                        )),
+                        _ => (),
+                    }
                 }
             }
             TextEventMsg::Preedit {
