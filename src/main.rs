@@ -3,9 +3,11 @@ use std::sync::LazyLock;
 use std::{fs, ptr};
 use std::{io, time::Duration};
 
+use clap::Parser;
 use configuration::{Configuration, APP_CONFIG};
 use gdk_pixbuf::gio::ApplicationFlags;
 use gdk_pixbuf::{Pixbuf, PixbufLoader};
+use glib::MainContext;
 use gtk::prelude::*;
 
 use relm4::gtk::gdk::Rectangle;
@@ -14,6 +16,7 @@ use relm4::{
     gtk::{self, gdk::DisplayManager, CssProvider, Window},
     Component, ComponentController, ComponentParts, ComponentSender, Controller, RelmApp,
 };
+use gtk4_layer_shell::{Edge, Layer, LayerShell};
 
 use anyhow::{anyhow, Context, Result};
 
@@ -21,11 +24,14 @@ use sketch_board::SketchBoardOutput;
 use ui::toolbars::{StyleToolbar, StyleToolbarInput, ToolsToolbar, ToolsToolbarInput};
 use xdg::BaseDirectories;
 
+mod client;
 mod command_line;
 mod configuration;
+mod daemon;
 mod femtovg_area;
 mod icons;
 mod ime;
+mod ipc;
 mod math;
 mod notification;
 mod sketch_board;
@@ -56,6 +62,7 @@ struct App {
     sketch_board: Controller<SketchBoard>,
     tools_toolbar: Controller<ToolsToolbar>,
     style_toolbar: Controller<StyleToolbar>,
+    is_daemon: bool,
 }
 
 #[derive(Debug)]
@@ -65,6 +72,10 @@ enum AppInput {
     ToggleToolbarsDisplay,
     ToolSwitchShortcut(Tools),
     ColorSwitchShortcut(u64),
+    LoadNewImage(Pixbuf),
+    ShowWindow,
+    HideWindow,
+    RequestExit,
 }
 
 #[derive(Debug)]
@@ -170,7 +181,7 @@ impl App {
 
 #[relm4::component]
 impl Component for App {
-    type Init = Pixbuf;
+    type Init = (Pixbuf, bool);
     type Input = AppInput;
     type Output = ();
     type CommandOutput = AppCommandOutput;
@@ -198,7 +209,8 @@ impl Component for App {
 
     fn update(&mut self, message: Self::Input, sender: ComponentSender<Self>, root: &Self::Root) {
         match message {
-            AppInput::Realized => self.resize_window_initial(root, sender),
+            // AppInput::Realized => self.resize_window_initial(root, sender),
+            AppInput::Realized => {}, // TODO: Call resize_window_initial conditionally if layer shell mode is enabled
             AppInput::SetToolbarsDisplay(visible) => {
                 self.tools_toolbar
                     .sender()
@@ -227,6 +239,31 @@ impl Component for App {
                         ui::toolbars::ColorButtons::Palette(index),
                     ));
             }
+            AppInput::LoadNewImage(pixbuf) => {
+                self.image_dimensions = (pixbuf.width(), pixbuf.height());
+                self.sketch_board
+                    .sender()
+                    .emit(SketchBoardInput::LoadNewImage(pixbuf));
+
+                // Trigger resize if needed after loading new image
+                if self.is_daemon {
+                    sender.input(AppInput::Realized);
+                }
+            }
+            AppInput::ShowWindow => {
+                root.set_visible(true);
+                root.present();
+            }
+            AppInput::HideWindow => {
+                root.set_visible(false);
+            }
+            AppInput::RequestExit => {
+                if self.is_daemon {
+                    root.set_visible(false);
+                } else {
+                    relm4::main_application().quit();
+                }
+            }
         }
     }
 
@@ -242,11 +279,28 @@ impl Component for App {
     }
 
     fn init(
-        image: Self::Init,
+        init_data: Self::Init,
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
+        let (image, is_daemon) = init_data;
+
         Self::apply_style();
+
+        root.init_layer_shell();
+
+        root.set_anchor(Edge::Top, true);
+        root.set_anchor(Edge::Bottom, true);
+        root.set_anchor(Edge::Left, true);
+        root.set_anchor(Edge::Right, true);
+
+        root.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::Exclusive);
+        root.set_layer(Layer::Overlay);
+        root.set_exclusive_zone(-1);
+
+        if is_daemon {
+            root.set_visible(false);
+        }
 
         let image_dimensions = (image.width(), image.height());
 
@@ -262,6 +316,7 @@ impl Component for App {
                     SketchBoardOutput::ColorSwitchShortcut(index) => {
                         AppInput::ColorSwitchShortcut(index)
                     }
+                    SketchBoardOutput::RequestExit => AppInput::RequestExit,
                 });
 
         // Toolbars
@@ -279,6 +334,7 @@ impl Component for App {
             tools_toolbar,
             style_toolbar,
             image_dimensions,
+            is_daemon,
         };
 
         let widgets = view_output!();
@@ -286,18 +342,41 @@ impl Component for App {
         if APP_CONFIG.read().focus_toggles_toolbars() {
             let motion_controller = gtk::EventControllerMotion::builder().build();
             let sender_clone = sender.clone();
+            let sender_clone2 = sender.clone();
 
             motion_controller.connect_enter(move |_, _, _| {
-                sender.input(AppInput::SetToolbarsDisplay(true));
+                sender_clone.input(AppInput::SetToolbarsDisplay(true));
             });
             motion_controller.connect_leave(move |_| {
-                sender_clone.input(AppInput::SetToolbarsDisplay(false));
+                sender_clone2.input(AppInput::SetToolbarsDisplay(false));
             });
 
             root.add_controller(motion_controller);
         }
 
         generate_profile_output!("app init end");
+
+        if is_daemon {
+            root.hide();
+            glib::spawn_future_local(glib::clone!(
+                #[strong]
+                sender,
+                async move {
+                    match daemon::DaemonServer::new().await {
+                        Ok(server) => {
+                            if let Err(e) = server.run(sender).await {
+                                eprintln!("Daemon server error: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to start daemon: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            ));
+        }
 
         glib::idle_add_local_once(move || {
             generate_profile_output!("main loop idle");
@@ -375,25 +454,63 @@ fn run_satty() -> Result<()> {
     };
 
     generate_profile_output!("image loaded, starting gui");
-    // start GUI
+
+    start_gui(image, false)
+}
+
+fn run_satty_daemon() -> Result<()> {
+    load_gl()?;
+    generate_profile_output!("loaded gl (daemon mode)");
+
+    let dummy_image = Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, true, 8, 100, 100)
+        .ok_or(anyhow!("Failed to create dummy pixbuf"))?;
+
+    generate_profile_output!("starting gui in daemon mode");
+    start_gui(dummy_image, true)
+}
+
+fn start_gui(image: Pixbuf, is_daemon: bool) -> Result<()> {
     let app = relm4::main_application();
     app.set_application_id(Some("com.gabm.satty"));
-    // set flag to allow to run multiple instances
     app.set_flags(ApplicationFlags::NON_UNIQUE);
-    // create relm app and run
-    let app = RelmApp::from_app(app).with_args(vec![]);
+    let app = RelmApp::from_app(app)
+        .with_args(vec![])
+        .visible_on_activate(!is_daemon);
     relm4_icons::initialize_icons(
         icons::icon_names::GRESOURCE_BYTES,
         icons::icon_names::RESOURCE_PREFIX,
     );
-    app.run::<App>(image);
+    app.run::<App>((image, is_daemon));
     Ok(())
 }
 
 fn main() -> Result<()> {
     let _ = *START_TIME;
-    // populate the APP_CONFIG from commandline and
-    // config file. this might exit, if an error occurred.
+
+
+    let command_line = command_line::CommandLine::parse();
+
+    if command_line.ping_daemon {
+        return MainContext::default().block_on(async {
+            client::Client::ping().await
+        });
+    }
+
+    if command_line.shutdown_daemon {
+        return MainContext::default().block_on(async {
+            client::Client::shutdown().await
+        });
+    }
+
+    if command_line.send_to_daemon {
+        let filename = command_line.filename
+            .ok_or(anyhow!("--filename is required when using --send-to-daemon"))?;
+
+        return MainContext::default().block_on(async {
+            client::Client::send_image(&filename).await
+        });
+    }
+
     Configuration::load();
     if APP_CONFIG.read().profile_startup() {
         eprintln!(
@@ -403,12 +520,22 @@ fn main() -> Result<()> {
     }
     generate_profile_output!("configuration loaded");
 
-    // run the application
-    match run_satty() {
-        Err(e) => {
-            eprintln!("Error: {e}");
-            Err(e)
+    if command_line.daemon {
+        eprintln!("Starting in daemon mode...");
+        match run_satty_daemon() {
+            Err(e) => {
+                eprintln!("Error: {e}");
+                Err(e)
+            }
+            Ok(v) => Ok(v),
         }
-        Ok(v) => Ok(v),
+    } else {
+        match run_satty() {
+            Err(e) => {
+                eprintln!("Error: {e}");
+                Err(e)
+            }
+            Ok(v) => Ok(v),
+        }
     }
 }

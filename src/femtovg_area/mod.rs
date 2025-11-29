@@ -69,6 +69,14 @@ impl FemtoVGArea {
             .reset()
     }
 
+    pub fn load_image(&mut self, pixbuf: &Pixbuf) {
+        self.imp()
+            .inner()
+            .as_mut()
+            .expect("Did you call init before using FemtoVgArea?")
+            .load_image(pixbuf);
+    }
+
     pub fn abs_canvas_to_image_coordinates(&self, input: Vec2D) -> Vec2D {
         self.imp()
             .inner()

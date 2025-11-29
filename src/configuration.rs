@@ -304,8 +304,10 @@ impl Configuration {
         // ---
     }
     fn merge(&mut self, file: Option<ConfigurationFile>, command_line: CommandLine) {
-        // input_filename is required and needs to be overwritten
-        self.input_filename = command_line.filename;
+        // input_filename is optional in daemon/client modes
+        if let Some(filename) = command_line.filename {
+            self.input_filename = filename;
+        }
 
         // overwrite with all specified values from config file
         if let Some(file) = file {

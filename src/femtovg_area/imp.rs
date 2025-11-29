@@ -304,6 +304,13 @@ impl FemtoVgAreaMut {
         self.active_tool = active_tool;
     }
 
+    pub fn load_image(&mut self, pixbuf: &Pixbuf) {
+        self.background_image = pixbuf.clone();
+        self.background_image_id = None;
+        self.drawables.clear();
+        self.redo_stack.clear();
+    }
+
     pub fn render_native_resolution(
         &mut self,
         canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,

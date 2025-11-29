@@ -9,7 +9,23 @@ pub struct CommandLine {
 
     /// Path to input image or '-' to read from stdin
     #[arg(short, long)]
-    pub filename: String,
+    pub filename: Option<String>,
+
+    /// Run in daemon mode (keeps GTK initialized and listens for IPC connections)
+    #[arg(long)]
+    pub daemon: bool,
+
+    /// Send image to running daemon instead of opening new window
+    #[arg(long)]
+    pub send_to_daemon: bool,
+
+    /// Ping the daemon to check if it's running
+    #[arg(long)]
+    pub ping_daemon: bool,
+
+    /// Shutdown the running daemon
+    #[arg(long)]
+    pub shutdown_daemon: bool,
 
     /// Start Satty in fullscreen mode
     #[arg(long)]

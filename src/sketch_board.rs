@@ -34,6 +34,7 @@ pub enum SketchBoardInput {
     ToolbarEvent(ToolbarEvent),
     RenderResult(RenderedImage, Vec<Action>),
     CommitEvent(TextEventMsg),
+    LoadNewImage(Pixbuf),
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +42,7 @@ pub enum SketchBoardOutput {
     ToggleToolbarsDisplay,
     ToolSwitchShortcut(Tools),
     ColorSwitchShortcut(u64),
+    RequestExit,
 }
 
 #[derive(Debug, Clone)]
@@ -249,7 +251,12 @@ impl SketchBoard {
         rv
     }
 
-    fn handle_render_result(&self, image: RenderedImage, actions: Vec<Action>) {
+    fn handle_render_result(
+        &self,
+        image: RenderedImage,
+        actions: Vec<Action>,
+        sender: &ComponentSender<Self>,
+    ) {
         let needs_pixbuf = actions.iter().any(|action| {
             matches!(
                 action,
@@ -284,14 +291,14 @@ impl SketchBoard {
             }
 
             if APP_CONFIG.read().early_exit() || action == Action::Exit {
-                self.handle_exit();
+                self.handle_exit(sender);
                 return;
             }
         }
     }
 
-    fn handle_exit(&self) {
-        relm4::main_application().quit();
+    fn handle_exit(&self, sender: &ComponentSender<Self>) {
+        let _ = sender.output(SketchBoardOutput::RequestExit);
     }
 
     fn handle_save(&self, image: &Pixbuf) {
@@ -811,8 +818,14 @@ impl Component for SketchBoard {
     }
 
     fn update(&mut self, msg: SketchBoardInput, sender: ComponentSender<Self>, _root: &Self::Root) {
-        // handle resize ourselves, pass everything else to tool
         let result = match msg {
+            SketchBoardInput::LoadNewImage(pixbuf) => {
+                self.renderer.load_image(&pixbuf);
+                self.tools.get_crop_tool().borrow_mut().clear_crop();
+                self.handle_resize();
+                self.refresh_screen();
+                ToolUpdateResult::Unmodified
+            }
             SketchBoardInput::InputEvent(mut ie) => {
                 if let InputEvent::Key(ke) = ie {
                     if ke.is_one_of(Key::z, KeyMappingId::UsZ)
@@ -907,7 +920,7 @@ impl Component for SketchBoard {
                 self.handle_toolbar_event(toolbar_event)
             }
             SketchBoardInput::RenderResult(img, action) => {
-                self.handle_render_result(img, action);
+                self.handle_render_result(img, action, &sender);
                 ToolUpdateResult::Unmodified
             }
             SketchBoardInput::CommitEvent(txt) => {

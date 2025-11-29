@@ -6,7 +6,7 @@ use crate::{
 };
 use anyhow::Result;
 use femtovg::{Color, Paint, Path};
-use relm4::gtk::gdk::Key;
+use relm4::{factory::Position, gtk::{gdk::Key, graphene::Vec2}};
 
 use super::{Drawable, Tool, ToolUpdateResult, Tools};
 
@@ -180,6 +180,11 @@ impl CropTool {
             Some(c) => Some(c),
             None => None,
         }
+    }
+
+    pub fn clear_crop(&mut self) {
+        self.crop = None;
+        self.action = None;
     }
 }
 
